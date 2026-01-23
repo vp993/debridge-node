@@ -144,4 +144,101 @@ describe('AddNewEventsAction', () => {
     );
     expect(processMock).toBeCalledTimes(1);
   });
+
+  describe('stale RPC response handling', () => {
+    let staleRpcService: AddNewEventsAction;
+    let staleWeb3;
+    let staleGetPastEventsMock;
+    let staleProcessMock;
+    let updateMock;
+
+    beforeEach(async () => {
+      staleProcessMock = jest.fn().mockResolvedValue({});
+      staleGetPastEventsMock = jest.fn().mockResolvedValue([]);
+      updateMock = jest.fn().mockResolvedValue({});
+
+      // Simulate stale RPC: getBlockNumber returns 100, but latestBlock in DB is 200
+      // This means fromBlock (200) > toBlock (99) after blockConfirmation
+      staleWeb3 = {
+        eth: {
+          setProvider: jest.fn().mockResolvedValue({}),
+          Contract: jest.fn().mockImplementation(() => {
+            return {
+              setProvider: jest.fn().mockResolvedValue({}),
+              getPastEvents: staleGetPastEventsMock,
+            };
+          }),
+          getBlockNumber: jest.fn().mockResolvedValue(100), // RPC returns block 100
+        },
+      };
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          {
+            provide: getRepositoryToken(SupportedChainEntity),
+            useValue: {
+              findOne: async () => {
+                return {
+                  chainId: 1,
+                  latestBlock: 200, // DB has synced to block 200 (ahead of RPC)
+                  network: 'eth',
+                } as SupportedChainEntity;
+              },
+              update: updateMock,
+            },
+          },
+          {
+            provide: ChainConfigService,
+            useValue: {
+              get(chainId) {
+                return {
+                  chainId,
+                  isSolana: false,
+                  maxBlockRange: 200,
+                  blockConfirmation: 1,
+                  debridgeAddr: 'debridgeAddr',
+                  providers: 'providers',
+                };
+              },
+            },
+          },
+          {
+            provide: Web3Service,
+            useValue: {
+              web3HttpProvider: jest.fn().mockImplementation(() => staleWeb3),
+            },
+          },
+          {
+            provide: SolanaReaderService,
+            useValue: {
+              syncTransactions: jest.fn().mockResolvedValue({}),
+            },
+          },
+          {
+            provide: SubmissionProcessingService,
+            useValue: {
+              process: staleProcessMock,
+            },
+          },
+          TransformService,
+          AddNewEventsAction,
+        ],
+      }).compile();
+      staleRpcService = module.get(AddNewEventsAction);
+    });
+
+    it('should reset latestBlock to toBlock when RPC returns stale block number', async () => {
+      await staleRpcService.action(1);
+
+      // Should NOT fetch events when fromBlock > toBlock
+      expect(staleGetPastEventsMock).not.toBeCalled();
+
+      // Should NOT process any submissions
+      expect(staleProcessMock).not.toBeCalled();
+
+      // Should update latestBlock to toBlock (99) to prevent massive resync
+      // toBlock = getBlockNumber(100) - blockConfirmation(1) = 99
+      expect(updateMock).toBeCalledWith(1, { latestBlock: 99 });
+    });
+  });
 });
