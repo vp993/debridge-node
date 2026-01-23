@@ -11,7 +11,6 @@ import { SubmissionProcessingService } from './SubmissionProcessingService';
 import { TransformService } from './TransformService';
 import { ProcessNewTransferResultStatusEnum } from '../enums/ProcessNewTransferResultStatusEnum';
 import Contract from 'web3-eth-contract';
-import { SubmissionEntity } from 'src/entities/SubmissionEntity';
 
 @Injectable()
 export class AddNewEventsAction {
@@ -21,8 +20,6 @@ export class AddNewEventsAction {
   constructor(
     @InjectRepository(SupportedChainEntity)
     private readonly supportedChainRepository: Repository<SupportedChainEntity>,
-    @InjectRepository(SubmissionEntity)
-    private readonly submissionsRepository: Repository<SubmissionEntity>,
     private readonly chainConfigService: ChainConfigService,
     private readonly web3Service: Web3Service,
     private readonly solanaReaderService: SolanaReaderService,
@@ -76,24 +73,14 @@ export class AddNewEventsAction {
     logger.debug(`Getting events from block ${fromBlock} to ${toBlock} on ${supportedChain.network}`);
 
     // Handle invalid block range (fromBlock > toBlock)
+    // This can happen when the RPC returns a stale block number due to load balancing,
+    // network issues, or node sync delays. We reset to toBlock to prevent massive resyncs.
     if (fromBlock > toBlock) {
-      logger.error(`Invalid block range: fromBlock (${fromBlock}) > toBlock (${toBlock})`);
-
-      // Find the latest block number for the given chainId from the submissions repository
-      const lastEvent = await this.submissionsRepository.findOne({
-        where: { chainFrom: chainId },
-        order: { blockNumber: 'DESC' }, // Get the highest block number
-      });
-
-      const newLatestBlock = lastEvent?.blockNumber ?? toBlock;
-      if (!lastEvent) {
-        logger.warn(`No events found for chainId ${chainId}. Using toBlock (${toBlock}) as latest.`);
-      } else {
-        logger.debug(`Found last event block number: ${newLatestBlock} for chainId ${chainId}`);
-      }
-
-      await this.supportedChainRepository.update(chainId, { latestBlock: newLatestBlock });
-      logger.log(`Updated latestBlock for chainId ${chainId} to ${newLatestBlock}`);
+      logger.warn(
+        `Stale RPC response detected: fromBlock (${fromBlock}) > toBlock (${toBlock}). ` +
+        `Resetting latestBlock to ${toBlock} to prevent resync from old blocks.`
+      );
+      await this.supportedChainRepository.update(chainId, { latestBlock: toBlock });
       return;
     }
 

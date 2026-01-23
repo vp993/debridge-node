@@ -4,7 +4,6 @@ import { Web3Service } from '../../../../web3/services/Web3Service';
 import { SolanaReaderService } from '../SolanaReaderService';
 import { SubmissionProcessingService } from '../SubmissionProcessingService';
 import { TransformService } from '../TransformService';
-import { SubmissionEntity } from '../../../../../entities/SubmissionEntity';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
 import { SupportedChainEntity } from '../../../../../entities/SupportedChainEntity';
@@ -51,30 +50,16 @@ describe('AddNewEventsAction', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         {
-          provide: getRepositoryToken(SubmissionEntity),
-          useValue: {
-            find: async () => {
-              return [
-                {
-                  submissionId: '123',
-                },
-              ];
-            },
-            update: async () => {
-              return;
-            },
-          },
-        },
-        {
           provide: getRepositoryToken(SupportedChainEntity),
           useValue: {
             findOne: async chainId => {
               return {
                 chainId,
-                latestBlock: 0,
+                latestBlock: 98,
                 network: 'eth',
               } as SupportedChainEntity;
             },
+            update: jest.fn().mockResolvedValue({}),
           },
         },
         ChainConfigService,
