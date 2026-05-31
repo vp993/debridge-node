@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { SubmissionEntity } from '../../../entities/SubmissionEntity';
 import { SupportedChainEntity } from '../../../entities/SupportedChainEntity';
@@ -14,7 +13,7 @@ import { TransformService } from './services/TransformService';
 import { SubmissionIdValidationService } from './services/SubmissionIdValidationService';
 
 @Module({
-  imports: [ConfigModule, ScheduleModule.forRoot(), TypeOrmModule.forFeature([SubmissionEntity, SupportedChainEntity])],
+  imports: [ConfigModule, TypeOrmModule.forFeature([SubmissionEntity, SupportedChainEntity])],
   providers: [
     Web3Service,
     ChainScanningService,

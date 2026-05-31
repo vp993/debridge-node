@@ -1,10 +1,11 @@
 import { HttpService } from '@nestjs/axios';
 import { Logger } from '@nestjs/common';
+import { sanitizeRequestConfigForLogging } from './sanitizeHttpLogging';
 
 export const addHttpServiceLogging = (httpService: HttpService, logger: Logger) => {
   httpService.axiosRef.interceptors.request.use(
     request => {
-      logger.verbose(`Http request ${JSON.stringify(request)}`);
+      logger.verbose(`Http request ${JSON.stringify(sanitizeRequestConfigForLogging(request))}`);
       return request;
     },
     request => {
@@ -15,14 +16,18 @@ export const addHttpServiceLogging = (httpService: HttpService, logger: Logger) 
   httpService.axiosRef.interceptors.response.use(
     response => {
       logger.verbose(
-        `Http response config: ${JSON.stringify(response.config)} status: ${response.status} statusText: ${
+        `Http response config: ${JSON.stringify(sanitizeRequestConfigForLogging(response.config))} status: ${response.status} statusText: ${
           response.statusText
         } headers: ${JSON.stringify(response.headers)} data: ${JSON.stringify(response.data)}`,
       );
       return response;
     },
     response => {
-      logger.error(`Http response ${JSON.stringify(response)}`);
+      const sanitized =
+        response && typeof response === 'object' && 'config' in response
+          ? { ...response, config: sanitizeRequestConfigForLogging((response as any).config) }
+          : response;
+      logger.error(`Http response ${JSON.stringify(sanitized)}`);
       return Promise.reject(response);
     },
   );

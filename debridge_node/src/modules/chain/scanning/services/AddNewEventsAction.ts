@@ -11,7 +11,7 @@ import { SubmissionProcessingService } from './SubmissionProcessingService';
 import { TransformService } from './TransformService';
 import { ProcessNewTransferResultStatusEnum } from '../enums/ProcessNewTransferResultStatusEnum';
 import Contract from 'web3-eth-contract';
-import { SubmissionEntity } from 'src/entities/SubmissionEntity';
+import { SubmissionEntity } from '../../../../entities/SubmissionEntity';
 
 @Injectable()
 export class AddNewEventsAction {
@@ -75,25 +75,30 @@ export class AddNewEventsAction {
     let fromBlock = from ?? supportedChain.latestBlock;
     logger.debug(`Getting events from block ${fromBlock} to ${toBlock} on ${supportedChain.network}`);
 
-    // Handle invalid block range (fromBlock > toBlock)
-    if (fromBlock > toBlock) {
-      logger.error(`Invalid block range: fromBlock (${fromBlock}) > toBlock (${toBlock})`);
+    // RPC returned garbage (0 or negative after subtracting confirmations) — skip entirely,
+    // don't touch the DB progress to avoid resetting it.
+    if (toBlock <= 0) {
+      logger.error(
+        `Invalid toBlock (${toBlock}) for chainId ${chainId}, RPC likely returned 0. Skipping scan.`
+      );
+      return;
+    }
 
-      // Find the latest block number for the given chainId from the submissions repository
+    // Handle stale RPC: fromBlock > toBlock can happen when the RPC node is behind
+    // due to load balancing, sync delays, or node failover. We use
+    // Math.max(lastEvent.blockNumber, toBlock) to avoid rolling back further than necessary.
+    if (fromBlock > toBlock) {
       const lastEvent = await this.submissionsRepository.findOne({
         where: { chainFrom: chainId },
-        order: { blockNumber: 'DESC' }, // Get the highest block number
+        order: { blockNumber: 'DESC' },
       });
 
-      const newLatestBlock = lastEvent?.blockNumber ?? toBlock;
-      if (!lastEvent) {
-        logger.warn(`No events found for chainId ${chainId}. Using toBlock (${toBlock}) as latest.`);
-      } else {
-        logger.debug(`Found last event block number: ${newLatestBlock} for chainId ${chainId}`);
-      }
-
-      await this.supportedChainRepository.update(chainId, { latestBlock: newLatestBlock });
-      logger.log(`Updated latestBlock for chainId ${chainId} to ${newLatestBlock}`);
+      const safeBlock = Math.max(lastEvent?.blockNumber ?? 0, toBlock);
+      logger.warn(
+        `Stale RPC response detected: fromBlock (${fromBlock}) > toBlock (${toBlock}). ` +
+        `Resetting latestBlock to ${safeBlock} to prevent resync from old blocks.`
+      );
+      await this.supportedChainRepository.update(chainId, { latestBlock: safeBlock });
       return;
     }
 
