@@ -12,6 +12,7 @@ import { TransformService } from './TransformService';
 import { ProcessNewTransferResultStatusEnum } from '../enums/ProcessNewTransferResultStatusEnum';
 import Contract from 'web3-eth-contract';
 import { SubmissionEntity } from '../../../../entities/SubmissionEntity';
+import { maskRpcUrl } from '../../../../utils/maskRpcUrl';
 
 @Injectable()
 export class AddNewEventsAction {
@@ -65,10 +66,8 @@ export class AddNewEventsAction {
     // Fetch chain details and initialize Web3 provider
     const supportedChain = await this.supportedChainRepository.findOne({ where: { chainId } });
     const chainConfig = this.chainConfigService.get(chainId) as EvmChainConfig;
-    const web3 = await this.web3Service.web3HttpProvider(chainConfig);
-    const gateContract = new web3.eth.Contract(deBridgeGateAbi as any, chainConfig.debridgeAddr);
-    // @ts-ignore
-    web3.eth.setProvider = gateContract.setProvider;
+    let web3 = await this.web3Service.web3HttpProvider(chainConfig);
+    let gateContract = this.createGateContract(web3, chainConfig);
 
     // Set block range: use provided values or defaults
     const toBlock = to ?? (await this.getConfirmedBlockNumber(web3, chainConfig.blockConfirmation));
@@ -78,9 +77,7 @@ export class AddNewEventsAction {
     // RPC returned garbage (0 or negative after subtracting confirmations) — skip entirely,
     // don't touch the DB progress to avoid resetting it.
     if (toBlock <= 0) {
-      logger.error(
-        `Invalid toBlock (${toBlock}) for chainId ${chainId}, RPC likely returned 0. Skipping scan.`
-      );
+      logger.error(`Invalid toBlock (${toBlock}) for chainId ${chainId}, RPC likely returned 0. Skipping scan.`);
       return;
     }
 
@@ -96,7 +93,7 @@ export class AddNewEventsAction {
       const safeBlock = Math.max(lastEvent?.blockNumber ?? 0, toBlock);
       logger.warn(
         `Stale RPC response detected: fromBlock (${fromBlock}) > toBlock (${toBlock}). ` +
-        `Resetting latestBlock to ${safeBlock} to prevent resync from old blocks.`
+          `Resetting latestBlock to ${safeBlock} to prevent resync from old blocks.`,
       );
       await this.supportedChainRepository.update(chainId, { latestBlock: safeBlock });
       return;
@@ -109,7 +106,10 @@ export class AddNewEventsAction {
         logger.warn(`latestBlock in db ${supportedChain.latestBlock} == lastBlockOfPage ${lastBlockOfPage}`);
         continue;
       }
-      const sentEvents = await this.getEvents(gateContract, fromBlock, lastBlockOfPage);
+      const eventPage = await this.getEventsWithProviderFailover(logger, chainConfig, gateContract, web3, fromBlock, lastBlockOfPage);
+      web3 = eventPage.web3;
+      gateContract = eventPage.gateContract;
+      const sentEvents = eventPage.sentEvents;
       logger.log(`sentEvents: ${JSON.stringify(sentEvents)}`);
       if (!sentEvents || sentEvents.length === 0) {
         logger.verbose(`Not found any events for ${chainId} ${fromBlock} - ${lastBlockOfPage}`);
@@ -166,5 +166,51 @@ export class AddNewEventsAction {
 
     /* get events */
     return await gateContract.getPastEvents('Sent', { fromBlock, toBlock });
+  }
+
+  private createGateContract(web3: Web3Custom, chainConfig: EvmChainConfig): Contract {
+    const gateContract = new web3.eth.Contract(deBridgeGateAbi as any, chainConfig.debridgeAddr);
+    // @ts-expect-error web3 setProvider is reassigned to the contract provider for existing call sites.
+    web3.eth.setProvider = gateContract.setProvider;
+    return gateContract;
+  }
+
+  private async getEventsWithProviderFailover(
+    logger: Logger,
+    chainConfig: EvmChainConfig,
+    initialGateContract: Contract,
+    initialWeb3: Web3Custom,
+    fromBlock: number,
+    toBlock: number,
+  ) {
+    let gateContract = initialGateContract;
+    let web3 = initialWeb3;
+    const failedProviders = new Set<string>();
+
+    while (true) {
+      try {
+        return {
+          sentEvents: await this.getEvents(gateContract, fromBlock, toBlock),
+          web3,
+          gateContract,
+        };
+      } catch (e) {
+        const failedProvider = web3.chainProvider;
+        failedProviders.add(failedProvider);
+        chainConfig.providers.setProviderStatus(failedProvider, false);
+        logger.error(`Provider ${maskRpcUrl(failedProvider)} failed to get events for range ` + `${fromBlock}-${toBlock}: ${e.message}`);
+
+        if (failedProviders.size >= chainConfig.providers.size()) {
+          throw e;
+        }
+
+        try {
+          web3 = await this.web3Service.web3HttpProvider(chainConfig, failedProviders);
+          gateContract = this.createGateContract(web3, chainConfig);
+        } catch {
+          throw e;
+        }
+      }
+    }
   }
 }

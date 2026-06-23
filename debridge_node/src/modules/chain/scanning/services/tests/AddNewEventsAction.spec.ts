@@ -28,6 +28,10 @@ async function buildService(config: {
   lastEventBlockNumber?: number | null;
   events?: any[];
   blockConfirmation?: number;
+  getPastEventsMock?: jest.Mock;
+  web3Mocks?: any[];
+  web3HttpProviderMock?: jest.Mock;
+  chainProviders?: any;
 }) {
   const isSolana = config.isSolana ?? false;
   const blockConfirmation = config.blockConfirmation ?? 1;
@@ -35,16 +39,15 @@ async function buildService(config: {
   const lastEventBlockNumber = config.lastEventBlockNumber ?? null;
 
   const updateMock = jest.fn().mockResolvedValue({});
-  const getPastEventsMock = jest.fn().mockResolvedValue(events);
+  const getPastEventsMock = config.getPastEventsMock ?? jest.fn().mockResolvedValue(events);
   const processMock = jest.fn().mockResolvedValue({});
   const syncTransactionsMock = jest.fn().mockResolvedValue({});
-  const submissionsFindOneMock = jest.fn().mockResolvedValue(
-    lastEventBlockNumber !== null
-      ? { blockNumber: lastEventBlockNumber, chainFrom: config.chainId }
-      : null,
-  );
+  const submissionsFindOneMock = jest
+    .fn()
+    .mockResolvedValue(lastEventBlockNumber !== null ? { blockNumber: lastEventBlockNumber, chainFrom: config.chainId } : null);
 
   const web3Mock = {
+    chainProvider: 'https://rpc-primary.debridge.com',
     eth: {
       setProvider: jest.fn(),
       Contract: jest.fn().mockImplementation(() => ({
@@ -84,7 +87,7 @@ async function buildService(config: {
               maxBlockRange: 200,
               blockConfirmation,
               debridgeAddr: 'debridgeAddr',
-              providers: 'providers',
+              providers: config.chainProviders ?? 'providers',
             };
           },
         },
@@ -92,7 +95,12 @@ async function buildService(config: {
       {
         provide: Web3Service,
         useValue: {
-          web3HttpProvider: jest.fn().mockImplementation(() => web3Mock),
+          web3HttpProvider:
+            config.web3HttpProviderMock ??
+            jest
+              .fn()
+              .mockImplementationOnce(() => config.web3Mocks?.[0] ?? web3Mock)
+              .mockImplementationOnce(() => config.web3Mocks?.[1] ?? config.web3Mocks?.[0] ?? web3Mock),
         },
       },
       {
@@ -111,7 +119,8 @@ async function buildService(config: {
   return {
     service: module.get(AddNewEventsAction),
     chainId: config.chainId,
-    web3: web3Mock,
+    web3: config.web3Mocks?.[0] ?? web3Mock,
+    web3Service: module.get(Web3Service),
     updateMock,
     getPastEventsMock,
     processMock,
@@ -157,8 +166,8 @@ describe('AddNewEventsAction', () => {
     it('scans correct block range and transforms events into submissions', async () => {
       const { service, chainId, getPastEventsMock, processMock, web3 } = await buildService({
         chainId: 1,
-        latestBlock: 98,       // fromBlock = 98
-        rpcBlockNumber: 100,   // toBlock = 100 - 1 = 99
+        latestBlock: 98, // fromBlock = 98
+        rpcBlockNumber: 100, // toBlock = 100 - 1 = 99
         events: [
           {
             returnValues: {
@@ -206,10 +215,105 @@ describe('AddNewEventsAction', () => {
           },
         ],
         chainId, // chainId
-        99,      // lastBlockOfPage
+        99, // lastBlockOfPage
         web3,
       );
       expect(processMock).toBeCalledTimes(1);
+    });
+
+    it('retries the same page with the next provider when historical log reads fail', async () => {
+      const firstGetPastEventsMock = jest.fn().mockRejectedValue(new Error('Archive requests require a personal token'));
+      const secondGetPastEventsMock = jest.fn().mockResolvedValue([]);
+      const firstWeb3 = {
+        chainProvider: 'https://recent-only-rpc.debridge.com',
+        eth: {
+          setProvider: jest.fn(),
+          Contract: jest.fn().mockImplementation(() => ({
+            setProvider: jest.fn(),
+            getPastEvents: firstGetPastEventsMock,
+          })),
+          getBlockNumber: jest.fn().mockResolvedValue(100),
+        },
+      };
+      const secondWeb3 = {
+        chainProvider: 'https://archive-rpc.debridge.com',
+        eth: {
+          setProvider: jest.fn(),
+          Contract: jest.fn().mockImplementation(() => ({
+            setProvider: jest.fn(),
+            getPastEvents: secondGetPastEventsMock,
+          })),
+          getBlockNumber: jest.fn().mockResolvedValue(100),
+        },
+      };
+      const chainProviders = {
+        setProviderStatus: jest.fn(),
+        size: jest.fn().mockReturnValue(2),
+      };
+
+      const { service, chainId, updateMock, processMock, web3Service } = await buildService({
+        chainId: 42161,
+        latestBlock: 98,
+        rpcBlockNumber: 100,
+        chainProviders,
+        web3Mocks: [firstWeb3, secondWeb3],
+      });
+
+      await service.action(chainId);
+
+      expect(firstGetPastEventsMock).toBeCalledWith('Sent', {
+        fromBlock: 98,
+        toBlock: 99,
+      });
+      expect(chainProviders.setProviderStatus).toBeCalledWith(firstWeb3.chainProvider, false);
+      expect(web3Service.web3HttpProvider).toHaveBeenNthCalledWith(1, expect.any(Object));
+      expect(web3Service.web3HttpProvider).toHaveBeenNthCalledWith(2, expect.any(Object), new Set([firstWeb3.chainProvider]));
+      expect(secondGetPastEventsMock).toBeCalledWith('Sent', {
+        fromBlock: 98,
+        toBlock: 99,
+      });
+      expect(updateMock).toBeCalledWith(chainId, { latestBlock: 99 });
+      expect(processMock).not.toBeCalled();
+    });
+
+    it('preserves the original event read error when failover cannot acquire another provider', async () => {
+      const originalError = new Error('Archive requests require a personal token');
+      const failoverError = new Error("Cann't connect to any provider");
+      const getPastEventsMock = jest.fn().mockRejectedValue(originalError);
+      const web3 = {
+        chainProvider: 'https://recent-only-rpc.debridge.com',
+        eth: {
+          setProvider: jest.fn(),
+          Contract: jest.fn().mockImplementation(() => ({
+            setProvider: jest.fn(),
+            getPastEvents: getPastEventsMock,
+          })),
+          getBlockNumber: jest.fn().mockResolvedValue(100),
+        },
+      };
+      const web3HttpProviderMock = jest.fn().mockResolvedValueOnce(web3).mockRejectedValueOnce(failoverError);
+      const chainProviders = {
+        setProviderStatus: jest.fn(),
+        size: jest.fn().mockReturnValue(2),
+      };
+
+      const { service, chainId } = await buildService({
+        chainId: 42161,
+        latestBlock: 98,
+        rpcBlockNumber: 100,
+        chainProviders,
+        web3HttpProviderMock,
+      });
+
+      let thrownError: Error;
+      try {
+        await service.process(chainId);
+      } catch (e) {
+        thrownError = e;
+      }
+
+      expect(thrownError).toBe(originalError);
+      expect(web3HttpProviderMock).toBeCalledTimes(2);
     });
   });
 

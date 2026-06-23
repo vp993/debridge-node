@@ -7,7 +7,10 @@ import { maskRpcUrl, maskRpcUrls } from '../../../utils/maskRpcUrl';
 import { DEFAULT_WEB3_TIMEOUT_MS, parsePositiveInt } from '../../../utils/parsePositiveInt';
 
 export class Web3Custom extends Web3 {
-  constructor(readonly chainProvider: string, httpProvider) {
+  constructor(
+    readonly chainProvider: string,
+    httpProvider,
+  ) {
     super(httpProvider);
   }
 }
@@ -59,9 +62,13 @@ export class Web3Service {
     return httpProvider;
   }
 
-  async web3HttpProvider(chainConfig: EvmChainConfig): Promise<Web3Custom> {
+  async web3HttpProvider(chainConfig: EvmChainConfig, excludedProviders = new Set<string>()): Promise<Web3Custom> {
     const chainProvider = chainConfig.providers;
-    for (const provider of [...chainProvider.getNotFailedProviders(), ...chainProvider.getFailedProviders()]) {
+    const providers = [...chainProvider.getNotFailedProviders(), ...chainProvider.getFailedProviders()].filter(
+      provider => !excludedProviders.has(provider),
+    );
+
+    for (const provider of providers) {
       if (this.providersMap.has(provider)) {
         const web3 = this.providersMap.get(provider);
         const isWorking = await this.checkConnectionHttpProvider(web3);
@@ -122,12 +129,10 @@ export class Web3Service {
       });
       const web3 = new Web3Custom(provider, httpProvider);
       const contractInstance = new web3.eth.Contract(deBridgeGateAbi as any, chainConfig.debridgeAddr);
-      // @ts-ignore
+      // @ts-expect-error web3 setProvider is reassigned to the contract provider for existing call sites.
       web3.eth.setProvider = contractInstance.setProvider;
 
-      const contractChainId = Number(
-        await contractInstance.methods.getChainId().call(),
-      );
+      const contractChainId = Number(await contractInstance.methods.getChainId().call());
       if (contractChainId !== chainProvider.getChainId()) {
         this.logger.error(`Checking correct RPC from config is failed (in config ${chainProvider.getChainId()} in contract ${contractChainId})`);
         process.exit(1);
